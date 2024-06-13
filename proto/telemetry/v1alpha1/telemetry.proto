@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: MPL-2.0
+/*
+ * Copyright (C) 2024 The Noisy Sockets Authors.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+syntax = "proto3";
+
+package noisysockets.telemetry.v1alpha1;
+
+option go_package = "github.com/noisysockets/telemetry/gen/telemetry/v1alpha1";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// Telemetry is a service for capturing crash reports and anonymous statistics.
+service Telemetry {
+  rpc Report(TelemetryEvent) returns (google.protobuf.Empty);
+}
+
+message StackFrame {
+  // The file name where the error occurred.
+  string file = 1;
+  // The name of the method where the error occurred.
+  string function = 2;
+  // The line number in the file where the error occurred.
+  int32 line = 3;
+  // The column number in the line where the error occurred.
+  int32 column = 4;
+}
+
+enum TelemetryEventKind {
+  // The event is informational.
+  INFO = 0;
+  // The event is a warning.
+  WARNING = 1;
+  // The event is an error.
+  ERROR = 2;
+}
+
+message TelemetryEvent {
+  // The session ID associated with the event. The session id is short-lived and not persisted.
+  // It is only used to link events together (as there might be a relationship between them).
+  string session_id = 1;
+  // Timestamp when the event occurred.
+  google.protobuf.Timestamp timestamp = 2;
+  // The kind of event.
+  TelemetryEventKind kind = 3;
+  // The name of the event.
+  string name = 4;
+  // A message associated with the event.
+  string message = 5;
+  // Any values associated with the event.
+  map<string, string> values = 6;
+  // If an error, the stack trace associated with the event.
+  repeated StackFrame stack_trace = 7;
+  // A set of tags associated with the event.
+  repeated string tags = 8;
+}
