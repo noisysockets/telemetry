@@ -71,6 +71,11 @@ func TestTelemetryReporting(t *testing.T) {
 
 	r.ReportEvent(&v1alpha1.TelemetryEvent{})
 
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	t.Cleanup(cancel)
+
+	require.NoError(t, r.Shutdown(ctx))
+
 	ev := <-receivedEvents
 	require.NotNil(t, ev)
 }

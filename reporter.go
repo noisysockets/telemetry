@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -41,13 +42,14 @@ var rootsPEM []byte
 
 // Reporter is a telemetry reporter.
 type Reporter struct {
-	logger     *slog.Logger
-	client     v1alpha1connect.TelemetryClient
-	authToken  string
-	sessionID  string
-	reportsCtx context.Context
-	reports    *errgroup.Group
-	enabled    bool
+	logger       *slog.Logger
+	client       v1alpha1connect.TelemetryClient
+	authToken    string
+	sessionID    string
+	reportsCtx   context.Context
+	reports      *errgroup.Group
+	shuttingDown atomic.Bool
+	enabled      bool
 }
 
 // NewReporter creates a new telemetry reporter.
@@ -100,6 +102,31 @@ func (r *Reporter) Close() error {
 	return nil
 }
 
+// Shutdown gracefully shuts down the telemetry reporter.
+func (r *Reporter) Shutdown(ctx context.Context) error {
+	// Stop accepting new reports.
+	r.shuttingDown.Store(true)
+
+	reportsDone := make(chan error, 1)
+	go func() {
+		defer close(reportsDone)
+
+		reportsDone <- r.reports.Wait()
+	}()
+
+	select {
+	case <-ctx.Done():
+		// Abort any ongoing reports.
+		return r.Close()
+	case err := <-reportsDone:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+
+		return nil
+	}
+}
+
 // ReportEvent reports a telemetry event.
 func (r *Reporter) ReportEvent(event *v1alpha1.TelemetryEvent) {
 	if !r.enabled {
@@ -111,6 +138,11 @@ func (r *Reporter) ReportEvent(event *v1alpha1.TelemetryEvent) {
 
 	if event.SessionId == "" {
 		event.SessionId = r.sessionID
+	}
+
+	if r.shuttingDown.Load() {
+		r.logger.Debug("Shutting down, dropping event")
+		return
 	}
 
 	started := r.reports.TryGo(func() error {
