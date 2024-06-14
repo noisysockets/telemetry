@@ -67,8 +67,6 @@ func NewReporter(logger *slog.Logger, baseURL, authToken string) *Reporter {
 		},
 	}
 
-	// TODO: configure TLS to only accept let's encrypt signed certificates.
-
 	return &Reporter{
 		logger:    logger,
 		client:    v1alpha1connect.NewTelemetryClient(&httpClient, baseURL),
