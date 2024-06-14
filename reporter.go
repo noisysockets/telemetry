@@ -40,12 +40,25 @@ const (
 //go:embed roots.pem
 var rootsPEM []byte
 
+// Configuration is the telemetry reporter configuration.
+type Configuration struct {
+	// BaseURL is the telemetry server base URL.
+	BaseURL string
+	// AuthToken is the telemetry API auth bearer token.
+	AuthToken string
+	// Tags is a list of optional tags to include in all telemetry reports.
+	Tags []string
+	// HTTPClient is the optional HTTP client to use for telemetry reporting.
+	HTTPClient *http.Client
+}
+
 // Reporter is a telemetry reporter.
 type Reporter struct {
 	logger       *slog.Logger
 	client       v1alpha1connect.TelemetryClient
 	authToken    string
 	sessionID    string
+	tags         []string
 	reportsCtx   context.Context
 	reports      *errgroup.Group
 	shuttingDown atomic.Bool
@@ -53,26 +66,30 @@ type Reporter struct {
 }
 
 // NewReporter creates a new telemetry reporter.
-func NewReporter(ctx context.Context, logger *slog.Logger, baseURL, authToken string) *Reporter {
+func NewReporter(ctx context.Context, logger *slog.Logger, conf Configuration) *Reporter {
 	enabled := os.Getenv(telemetryOptOutEnvVar) == ""
 
 	if !enabled {
 		logger.Info("Telemetry reporting is disabled")
 	}
 
-	// Only trust Let's Encrypt, eg. ISRG Root X1 (DST Root CA X3) and
-	// ISRG Root X2 (ISRG Root CA).
-	roots := x509.NewCertPool()
-	if ok := roots.AppendCertsFromPEM(rootsPEM); !ok {
-		panic("failed to parse roots.pem")
-	}
+	httpClient := conf.HTTPClient
+	if httpClient == nil {
+		// Only trust Let's Encrypt, eg. ISRG Root X1 (DST Root CA X3) and
+		// ISRG Root X2 (ISRG Root CA).
+		roots := x509.NewCertPool()
+		if ok := roots.AppendCertsFromPEM(rootsPEM); !ok {
+			panic("failed to parse roots.pem")
+		}
 
-	httpClient := *http.DefaultClient
-	httpClient.Timeout = 5 * time.Second
-	httpClient.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{
-			RootCAs: roots,
-		},
+		httpClient = &http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					RootCAs: roots,
+				},
+			},
+		}
 	}
 
 	reports, reportsCtx := errgroup.WithContext(ctx)
@@ -80,9 +97,10 @@ func NewReporter(ctx context.Context, logger *slog.Logger, baseURL, authToken st
 
 	return &Reporter{
 		logger:     logger,
-		client:     v1alpha1connect.NewTelemetryClient(&httpClient, baseURL),
-		authToken:  authToken,
+		client:     v1alpha1connect.NewTelemetryClient(httpClient, conf.BaseURL),
+		authToken:  conf.AuthToken,
 		sessionID:  util.GenerateID(16),
+		tags:       conf.Tags,
 		reportsCtx: reportsCtx,
 		reports:    reports,
 		enabled:    enabled,
@@ -139,6 +157,8 @@ func (r *Reporter) ReportEvent(event *v1alpha1.TelemetryEvent) {
 	if event.SessionId == "" {
 		event.SessionId = r.sessionID
 	}
+
+	event.Tags = append(event.Tags, r.tags...)
 
 	if r.shuttingDown.Load() {
 		r.logger.Debug("Shutting down, dropping event")

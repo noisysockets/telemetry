@@ -64,7 +64,10 @@ func TestTelemetryReporting(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	baseURL := "http://" + lis.Addr().String()
-	r := telemetry.NewReporter(ctx, logger, baseURL, "")
+	r := telemetry.NewReporter(ctx, logger, telemetry.Configuration{
+		BaseURL: baseURL,
+		Tags:    []string{"test"},
+	})
 	t.Cleanup(func() {
 		require.NoError(t, r.Close())
 	})
@@ -78,6 +81,8 @@ func TestTelemetryReporting(t *testing.T) {
 
 	ev := <-receivedEvents
 	require.NotNil(t, ev)
+
+	require.Equal(t, []string{"test"}, ev.Tags)
 }
 
 type mockSvc struct {
