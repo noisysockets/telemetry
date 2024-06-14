@@ -14,6 +14,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	_ "embed"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -23,10 +25,13 @@ import (
 	"github.com/noisysockets/telemetry/gen/telemetry/v1alpha1"
 	"github.com/noisysockets/telemetry/gen/telemetry/v1alpha1/v1alpha1connect"
 	"github.com/noisysockets/telemetry/internal/util"
+	"golang.org/x/sync/errgroup"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
+	// The maximum number of in-flight telemetry reports.
+	maxConcurrentReports = 16
 	// If set to any non-empty value, telemetry reporting will be disabled.
 	telemetryOptOutEnvVar = "NSH_NO_TELEMETRY"
 )
@@ -36,24 +41,25 @@ var rootsPEM []byte
 
 // Reporter is a telemetry reporter.
 type Reporter struct {
-	logger    *slog.Logger
-	client    v1alpha1connect.TelemetryClient
-	authToken string
-	sessionID string
-	enabled   bool
+	logger     *slog.Logger
+	client     v1alpha1connect.TelemetryClient
+	authToken  string
+	sessionID  string
+	reportsCtx context.Context
+	reports    *errgroup.Group
+	enabled    bool
 }
 
 // NewReporter creates a new telemetry reporter.
-func NewReporter(logger *slog.Logger, baseURL, authToken string) *Reporter {
+func NewReporter(ctx context.Context, logger *slog.Logger, baseURL, authToken string) *Reporter {
 	enabled := os.Getenv(telemetryOptOutEnvVar) == ""
 
 	if !enabled {
 		logger.Info("Telemetry reporting is disabled")
 	}
 
-	// Only trust Let's Encrypt signed certificates.
-	// ISRG Root X1 (DST Root CA X3) and ISRG Root X2 (ISRG Root CA) are the only
-	// root certificates that Let's Encrypt currently uses.
+	// Only trust Let's Encrypt, eg. ISRG Root X1 (DST Root CA X3) and
+	// ISRG Root X2 (ISRG Root CA).
 	roots := x509.NewCertPool()
 	if ok := roots.AppendCertsFromPEM(rootsPEM); !ok {
 		panic("failed to parse roots.pem")
@@ -67,17 +73,37 @@ func NewReporter(logger *slog.Logger, baseURL, authToken string) *Reporter {
 		},
 	}
 
+	reports, reportsCtx := errgroup.WithContext(ctx)
+	reports.SetLimit(maxConcurrentReports)
+
 	return &Reporter{
-		logger:    logger,
-		client:    v1alpha1connect.NewTelemetryClient(&httpClient, baseURL),
-		authToken: authToken,
-		sessionID: util.GenerateID(16),
-		enabled:   enabled,
+		logger:     logger,
+		client:     v1alpha1connect.NewTelemetryClient(&httpClient, baseURL),
+		authToken:  authToken,
+		sessionID:  util.GenerateID(16),
+		reportsCtx: reportsCtx,
+		reports:    reports,
+		enabled:    enabled,
 	}
 }
 
+// Close aborts any ongoing telemetry reporting.
+func (r *Reporter) Close() error {
+	r.reports.Go(func() error {
+		return context.Canceled
+	})
+
+	if err := r.reports.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+
+	return nil
+}
+
+// ReportEvent reports a telemetry event.
 func (r *Reporter) ReportEvent(event *v1alpha1.TelemetryEvent) {
 	if !r.enabled {
+		r.logger.Debug("Telemetry reporting is disabled, dropping event")
 		return
 	}
 
@@ -87,28 +113,28 @@ func (r *Reporter) ReportEvent(event *v1alpha1.TelemetryEvent) {
 		event.SessionId = r.sessionID
 	}
 
-	var webEvent bool
-	for _, tag := range event.Tags {
-		if tag == "web" {
-			webEvent = true
-			break
+	started := r.reports.TryGo(func() error {
+		// Absolute maximum limit.
+		ctx, cancel := context.WithTimeout(r.reportsCtx, 30*time.Second)
+		defer cancel()
+
+		req := &connect.Request[v1alpha1.TelemetryEvent]{Msg: event}
+		if r.authToken != "" {
+			req.Header().Set(
+				"Authorization",
+				"Bearer "+r.authToken,
+			)
 		}
-	}
 
-	if !webEvent {
-		event.Tags = append(event.Tags, "backend")
-	}
+		if _, err := r.client.Report(ctx, req); err != nil {
+			// Don't spam the logs when the user is offline.
+			fmt.Println("Failed to report event", err)
+			r.logger.Debug("Failed to report event", slog.Any("error", err))
+		}
 
-	req := &connect.Request[v1alpha1.TelemetryEvent]{Msg: event}
-	if r.authToken != "" {
-		req.Header().Set(
-			"Authorization",
-			"Bearer "+r.authToken,
-		)
-	}
-
-	if _, err := r.client.Report(context.Background(), req); err != nil {
-		// Don't spam the logs when the user is offline.
-		r.logger.Debug("Failed to report event", "error", err)
+		return nil
+	})
+	if !started {
+		r.logger.Warn("Too many in-flight telemetry reports, dropping event")
 	}
 }
