@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"sync/atomic"
 	"time"
 
@@ -30,12 +29,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-const (
-	// The maximum number of in-flight telemetry reports.
-	maxConcurrentReports = 16
-	// If set to any non-empty value, telemetry reporting will be disabled.
-	telemetryOptOutEnvVar = "NSH_NO_TELEMETRY"
-)
+// The maximum number of in-flight telemetry reports.
+const maxConcurrentReports = 16
 
 //go:embed roots.pem
 var rootsPEM []byte
@@ -62,17 +57,10 @@ type Reporter struct {
 	reportsCtx   context.Context
 	reports      *errgroup.Group
 	shuttingDown atomic.Bool
-	enabled      bool
 }
 
 // NewReporter creates a new telemetry reporter.
 func NewReporter(ctx context.Context, logger *slog.Logger, conf Configuration) *Reporter {
-	enabled := os.Getenv(telemetryOptOutEnvVar) == ""
-
-	if !enabled {
-		logger.Info("Telemetry reporting is disabled")
-	}
-
 	httpClient := conf.HTTPClient
 	if httpClient == nil {
 		// Only trust Let's Encrypt, eg. ISRG Root X1 (DST Root CA X3) and
@@ -103,7 +91,6 @@ func NewReporter(ctx context.Context, logger *slog.Logger, conf Configuration) *
 		tags:       conf.Tags,
 		reportsCtx: reportsCtx,
 		reports:    reports,
-		enabled:    enabled,
 	}
 }
 
@@ -147,11 +134,6 @@ func (r *Reporter) Shutdown(ctx context.Context) error {
 
 // ReportEvent reports a telemetry event.
 func (r *Reporter) ReportEvent(event *v1alpha1.TelemetryEvent) {
-	if !r.enabled {
-		r.logger.Debug("Telemetry reporting is disabled, dropping event")
-		return
-	}
-
 	event.Timestamp = timestamppb.Now()
 
 	if event.SessionId == "" {

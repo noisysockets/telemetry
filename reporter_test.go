@@ -31,8 +31,6 @@ import (
 )
 
 func TestTelemetryReporting(t *testing.T) {
-	os.Unsetenv("NSH_NO_TELEMETRY")
-
 	ctx := context.Background()
 	logger := slogt.New(t)
 
